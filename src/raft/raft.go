@@ -39,6 +39,7 @@ const (
 const (
 	electionTimeoutMin time.Duration = 250 * time.Second
 	electionTimeoutMax time.Duration = 400 * time.Second
+	replInterval       time.Duration = 200 * time.Millisecond
 )
 
 // resetElectionTimerLocked 重置选举定时器
@@ -200,7 +201,7 @@ type RequestVoteReply struct {
 
 // RequestVote example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (PartA, PartB).
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -225,6 +226,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.votedFor = args.CandidateId
 	rf.resetElectionTimerLocked()
 	LOG(rf.me, rf.currentTerm, DVote, "-> S%d", args.CandidateId)
+}
+
+// AppendEntries 心跳响应
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// align the term
+	reply.Term = rf.currentTerm
+	reply.Success = false
+	if rf.currentTerm > args.Term {
+		LOG(rf.me, rf.currentTerm, DLog, "<- S%d, Reject, higher term, T%d>T%d", args.LeaderId, rf.currentTerm, args.Term)
+		return
+	}
+	if rf.currentTerm <= args.Term {
+		rf.becomeFollowerLocked(args.Term)
+	}
+	rf.resetElectionTimerLocked()
+	reply.Success = true
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -256,6 +276,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+func (rf *Raft) sendAppendEntries(p int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[p].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -363,8 +387,6 @@ func (rf *Raft) startElection(term int) bool {
 func (rf *Raft) electionTicker() {
 	for !rf.killed() {
 
-		// Your code here (PartA)
-		// Check if a leader election should be started.
 		rf.mu.Lock()
 		if rf.role != Leader && rf.isElectionTimeoutLocked() {
 			rf.becomeCandidateLocked()
@@ -382,8 +404,61 @@ func (rf *Raft) contextLostLocked(role Role, term int) bool {
 	return !(rf.role == role && rf.currentTerm == term)
 }
 
+// replicationTicker 定时发送心跳
 func (rf *Raft) replicationTicker(term int) {
+	for !rf.killed() {
+		ok := rf.startReplication(term)
+		if !ok {
+			break
+		}
+		time.Sleep(replInterval)
+	}
+}
 
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) startReplication(term int) bool {
+
+	replicateToPeer := func(p int, args *AppendEntriesArgs) {
+		reply := &AppendEntriesReply{}
+		ok := rf.sendAppendEntries(p, args, reply)
+		if !ok {
+			LOG(rf.me, rf.currentTerm, DDebug, "-> S%d, Lost or error", p)
+			return
+		}
+		if reply.Term > rf.currentTerm {
+			rf.becomeFollowerLocked(reply.Term)
+			return
+		}
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.contextLostLocked(Leader, term) {
+		LOG(rf.me, rf.currentTerm, DLeader, "Lost context, abort replication in Leader[T%d] -> T%d", rf.currentTerm, term)
+		return false
+	}
+
+	for p := range rf.peers {
+		if p == rf.me {
+			continue
+		}
+		args := &AppendEntriesArgs{
+			Term:     term,
+			LeaderId: rf.me,
+		}
+		go replicateToPeer(p, args)
+	}
+	return true
 }
 
 // Make the service or tester wants to create a Raft server. the ports
