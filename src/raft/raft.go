@@ -99,7 +99,7 @@ func (rf *Raft) becomeFollowerLocked(term int) {
 		LOG(rf.me, rf.currentTerm, DError, "Can't become follower, lower term: T%d", term)
 		return
 	}
-	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%s->T%s", rf.role, rf.currentTerm, term)
+	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%d->T%d", rf.role, rf.currentTerm, term)
 	rf.role = Follower
 	rf.currentTerm = term
 	if term > rf.currentTerm {
@@ -112,7 +112,7 @@ func (rf *Raft) becomeCandidateLocked() {
 		LOG(rf.me, rf.currentTerm, DError, "Leader can't become candidate")
 		return
 	}
-	LOG(rf.me, rf.currentTerm, DVote, "%s->Candidate, For T%s", rf.role, rf.currentTerm+1)
+	LOG(rf.me, rf.currentTerm, DVote, "%s->Candidate, For T%d", rf.role, rf.currentTerm+1)
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
