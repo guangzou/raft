@@ -11,12 +11,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if rf.currentTerm > args.Term {
-		LOG(rf.me, rf.currentTerm, DLog, "<- S%d, Reject, higher term, T%d>T%d", args.LeaderId, rf.currentTerm, args.Term)
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Reject, higher term, T%d>T%d", args.LeaderId, rf.currentTerm, args.Term)
 		return
 	}
 	if rf.currentTerm <= args.Term {
 		rf.becomeFollowerLocked(args.Term)
 	}
+
+	prevIndex, prevTerm := args.PrevLogIndex, args.PrevLogTerm
+	// 要同步的日志索引比我本地的日志长度还要大，说明此时我已经很久没有同步日志了
+	if prevIndex > len(rf.log) {
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Reject log, it's log too short, len:%d < prev:%d",
+			args.LeaderId, len(rf.log), prevIndex)
+		return
+	}
+
+	// 日志任期不一致
+	if rf.log[prevIndex].Term != prevTerm {
+		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Reject log, Prev log not match, [%d]: T%d != T%d",
+			args.LeaderId, prevIndex, prevTerm, rf.log[prevIndex].Term)
+		return
+	}
+	// 更新本地日志，截断日志，从prevIndex处后面添加新的日志
+	rf.log = append(rf.log[:prevIndex+1], args.Entries...)
+	LOG(rf.me, rf.currentTerm, DLog2, "Follower accept log: (%d, %d]", prevIndex, prevIndex+len(args.Entries))
+
 	rf.resetElectionTimerLocked()
 	reply.Success = true
 }
@@ -37,9 +56,18 @@ func (rf *Raft) replicationTicker(term int) {
 	}
 }
 
+type LogEntry struct {
+	Command      interface{} // 执行的指令
+	CommandVaild bool        // 是否是操作数据的执行指令
+	Term         int
+}
+
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int // 上一条日志在日志数组里的索引位置
+	PrevLogTerm  int // 上一条日志的任期
+	Entries      []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -60,6 +88,20 @@ func (rf *Raft) startReplication(term int) bool {
 			rf.becomeFollowerLocked(reply.Term)
 			return
 		}
+		if !reply.Success {
+			index, term := args.PrevLogIndex, args.PrevLogTerm
+			for index > 0 && rf.log[index].Term == term {
+				index--
+			}
+			rf.nextIndex[p] = index + 1
+			LOG(rf.me, rf.currentTerm, DLog, "Not match with S%d in %d, try next=%d", p, index, rf.nextIndex[p])
+			return
+		}
+		// 更新Leader的matchIndex和nextIndex
+		rf.matchIndex[p] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[p] = rf.matchIndex[p] + 1
+
+		// TODO：update commitIndex
 	}
 
 	rf.mu.Lock()
@@ -72,11 +114,19 @@ func (rf *Raft) startReplication(term int) bool {
 
 	for p := range rf.peers {
 		if p == rf.me {
+			// 更新leader自己的数组
+			rf.matchIndex[p] = len(rf.log) - 1
+			rf.nextIndex[p] = len(rf.log)
 			continue
 		}
+		prevIndex := rf.nextIndex[p] - 1
+		prevTerm := rf.log[prevIndex].Term
 		args := &AppendEntriesArgs{
-			Term:     term,
-			LeaderId: rf.me,
+			Term:         term,
+			LeaderId:     rf.me,
+			PrevLogIndex: prevIndex,
+			PrevLogTerm:  prevTerm,
+			Entries:      rf.log[prevIndex+1:],
 		}
 		go replicateToPeer(p, args)
 	}

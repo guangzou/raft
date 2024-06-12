@@ -69,12 +69,14 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (PartA, PartB, PartC).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
 	role        Role
 	currentTerm int
 	votedFor    int // -1 means hasn't voted yet
+
+	log []LogEntry // 每一个peer自己本地的log记录
+
+	nextIndex  []int // Leader拥有的记录每个不同peer的应该同步的下一条日志数组NextIndex
+	matchIndex []int // Lader拥有的记录每个不同peer已经匹配好的日志数组matchIndex
 
 	electionStart   time.Time
 	electionTimeout time.Duration // randomized election timeout
@@ -111,6 +113,11 @@ func (rf *Raft) becomeLeaderLocked() {
 	}
 	LOG(rf.me, rf.currentTerm, DLeader, "Become Leader in T%d", rf.currentTerm)
 	rf.role = Leader
+	// 初始化自己的各跟随者的matchIndex和nextIndex数组
+	for peer := 0; peer < len(rf.peers); peer++ {
+		rf.nextIndex[peer] = len(rf.log)
+		rf.matchIndex[peer] = 0
+	}
 }
 
 // GetState return currentTerm and whether this server
@@ -234,6 +241,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
+
+	rf.log = append(rf.log, LogEntry{})
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
