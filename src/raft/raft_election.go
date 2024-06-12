@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+func (rf *Raft) isNewLocked(candidateIndex, candidateTerm int) bool {
+	l := len(rf.log)
+	lastIndex, lastTerm := l-1, rf.log[l-1].Term
+	LOG(rf.me, rf.currentTerm, DVote, "Compare last log, Me: [%d]T%d, Candidate: [%d]T%d", lastIndex, lastTerm, candidateIndex, candidateTerm)
+	// 任期不相等，Term高者更新
+	if candidateTerm != lastTerm {
+		return lastTerm > candidateTerm
+	}
+	// 任期相等，index大者更新
+	return lastIndex > candidateIndex
+}
+
 // resetElectionTimerLocked 重置选举定时器
 func (rf *Raft) resetElectionTimerLocked() {
 	rf.electionStart = time.Now()
@@ -20,9 +32,10 @@ func (rf *Raft) isElectionTimeoutLocked() bool {
 // RequestVoteArgs example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (PartA, PartB).
-	Term        int
-	CandidateId int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // RequestVoteReply example RequestVote RPC reply structure.
@@ -43,7 +56,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 	if rf.currentTerm > args.Term {
-		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject vote, higher term, T%d>T%d", args.CandidateId, rf.currentTerm, args.Term)
+		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject voted, higher term, T%d>T%d", args.CandidateId, rf.currentTerm, args.Term)
 		return
 	}
 
@@ -52,7 +65,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor != -1 {
-		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject, Already voted S%d", args.CandidateId, rf.votedFor)
+		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject voted, Already voted S%d", args.CandidateId, rf.votedFor)
+		return
+	}
+
+	if rf.isNewLocked(args.LastLogIndex, args.LastLogTerm) {
+		LOG(rf.me, rf.currentTerm, DVote, "-> S%d, Reject voted, S%d's log less up-to-date", args.CandidateId)
 		return
 	}
 
@@ -139,15 +157,17 @@ func (rf *Raft) startElection(term int) bool {
 	if rf.contextLostLocked(Candidate, term) {
 		return false
 	}
-
+	l := len(rf.log)
 	for p := range rf.peers {
 		if p == rf.me {
 			votes++
 			continue
 		}
 		args := &RequestVoteArgs{
-			Term:        rf.currentTerm,
-			CandidateId: rf.me,
+			Term:         rf.currentTerm,
+			CandidateId:  rf.me,
+			LastLogIndex: l - 1,
+			LastLogTerm:  rf.log[l-1].Term,
 		}
 		go askVoteFromPeer(p, args)
 	}
