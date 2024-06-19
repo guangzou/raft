@@ -73,6 +73,12 @@ type Raft struct {
 	currentTerm int
 	votedFor    int // -1 means hasn't voted yet
 
+	// 应用日志
+	commitIndex int
+	lastApplied int
+	applyCond   *sync.Cond
+	applyCh     chan ApplyMsg
+
 	log []LogEntry // 每一个peer自己本地的log记录
 
 	nextIndex  []int // Leader拥有的记录每个不同peer的应该同步的下一条日志数组NextIndex
@@ -242,6 +248,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = -1
 
+	// 初始化apply日志
+	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
+
 	rf.log = append(rf.log, LogEntry{})
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -251,6 +261,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
+	go rf.applyTicker()
 
 	return rf
 }

@@ -1,8 +1,11 @@
 package raft
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
-// AppendEntries 心跳响应
+// AppendEntries Follwer对Leader的心跳响应
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -36,6 +39,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.log = append(rf.log[:prevIndex+1], args.Entries...)
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower accept log: (%d, %d]", prevIndex, prevIndex+len(args.Entries))
 
+	// 更新commitIndex
+	if args.LeaderCommitIndex > rf.commitIndex {
+		LOG(rf.me, rf.currentTerm, DApply, "Follower update commitIndex %d -> %d", rf.commitIndex, args.LeaderCommitIndex)
+		rf.commitIndex = args.LeaderCommitIndex
+		rf.applyCond.Signal()
+	}
+
 	rf.resetElectionTimerLocked()
 	reply.Success = true
 }
@@ -63,11 +73,12 @@ type LogEntry struct {
 }
 
 type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int // 上一条日志在日志数组里的索引位置
-	PrevLogTerm  int // 上一条日志的任期
-	Entries      []LogEntry
+	Term              int
+	LeaderId          int
+	PrevLogIndex      int // 上一条日志在日志数组里的索引位置
+	PrevLogTerm       int // 上一条日志的任期
+	Entries           []LogEntry
+	LeaderCommitIndex int
 }
 
 type AppendEntriesReply struct {
@@ -102,6 +113,12 @@ func (rf *Raft) startReplication(term int) bool {
 		rf.nextIndex[p] = rf.matchIndex[p] + 1
 
 		// TODO：update commitIndex
+		majorIndex := rf.getMajorPeerMatchIndexLocked()
+		if majorIndex > rf.commitIndex {
+			LOG(rf.me, rf.currentTerm, DApply, "Leader update commitIndex %d -> %d", rf.commitIndex, majorIndex)
+			rf.commitIndex = majorIndex
+			rf.applyCond.Signal()
+		}
 	}
 
 	rf.mu.Lock()
@@ -122,13 +139,24 @@ func (rf *Raft) startReplication(term int) bool {
 		prevIndex := rf.nextIndex[p] - 1
 		prevTerm := rf.log[prevIndex].Term
 		args := &AppendEntriesArgs{
-			Term:         term,
-			LeaderId:     rf.me,
-			PrevLogIndex: prevIndex,
-			PrevLogTerm:  prevTerm,
-			Entries:      rf.log[prevIndex+1:],
+			Term:              term,
+			LeaderId:          rf.me,
+			PrevLogIndex:      prevIndex,
+			PrevLogTerm:       prevTerm,
+			Entries:           rf.log[prevIndex+1:],
+			LeaderCommitIndex: rf.commitIndex,
 		}
 		go replicateToPeer(p, args)
 	}
 	return true
+}
+
+// 获取大多数peer中matchIndex的位置，排好序，取多数派中的那个matchIndex
+func (rf *Raft) getMajorPeerMatchIndexLocked() int {
+	tmpSlice := make([]int, len(rf.peers))
+	copy(tmpSlice, rf.matchIndex)
+	sort.Ints(sort.IntSlice(tmpSlice))
+	majorIndex := (len(rf.peers) - 1) / 2
+	LOG(rf.me, rf.currentTerm, DDebug, "MatchIndex after sort: %v,majorIndex=%d which in matchIndex[%d]", rf.matchIndex, majorIndex, tmpSlice[majorIndex])
+	return tmpSlice[majorIndex]
 }
