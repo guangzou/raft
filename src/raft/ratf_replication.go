@@ -37,6 +37,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// 更新本地日志，截断日志，从prevIndex处后面添加新的日志
 	rf.log = append(rf.log[:prevIndex+1], args.Entries...)
+	rf.persistLocked()
 	LOG(rf.me, rf.currentTerm, DLog2, "Follower accept log: (%d, %d]", prevIndex, prevIndex+len(args.Entries))
 
 	// 更新commitIndex

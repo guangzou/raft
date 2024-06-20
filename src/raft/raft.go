@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,7 +72,7 @@ type Raft struct {
 
 	role        Role
 	currentTerm int
-	votedFor    int // -1 means hasn't voted yet
+	votedFor    int // -1 means hasn't voted yet , 票投给了哪个候选者
 
 	// 应用日志
 	commitIndex int
@@ -95,9 +96,14 @@ func (rf *Raft) becomeFollowerLocked(term int) {
 	}
 	LOG(rf.me, rf.currentTerm, DLog, "%s->Follower, For T%d->T%d", rf.role, rf.currentTerm, term)
 	rf.role = Follower
-	rf.currentTerm = term
+	shouldPersist := term != rf.currentTerm
 	if term > rf.currentTerm {
 		rf.votedFor = -1
+	}
+	rf.currentTerm = term
+	// 持久化，任期发生了改变
+	if shouldPersist {
+		rf.persistLocked()
 	}
 }
 
@@ -110,6 +116,8 @@ func (rf *Raft) becomeCandidateLocked() {
 	rf.role = Candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	// 持久化，votedFor和任期均发生了改变
+	rf.persistLocked()
 }
 
 func (rf *Raft) becomeLeaderLocked() {
@@ -135,44 +143,6 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.role == Leader
 }
 
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-// before you've implemented snapshots, you should pass nil as the
-// second argument to persister.Save().
-// after you've implemented snapshots, pass the current snapshot
-// (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
-	// Your code here (PartC).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
-}
-
-// restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (PartC).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-}
-
 // Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -194,14 +164,22 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+// Start Leader接受应用层命令函数，要将 `command` 包裹为日志，然后追加到本地日志中，也需要持久化
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	// Your code here (PartB).
+	if rf.role != Leader {
+		return 0, 0, false
+	}
+	rf.log = append(rf.log, LogEntry{
+		CommandVaild: true,
+		Command:      command,
+		Term:         rf.currentTerm,
+	})
+	rf.persistLocked()
 
-	return index, term, isLeader
+	return len(rf.log) - 1, rf.currentTerm, true
 }
 
 // Kill the tester doesn't halt goroutines created by Raft after each test,
@@ -225,6 +203,10 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) contextLostLocked(role Role, term int) bool {
 	return !(rf.role == role && rf.currentTerm == term)
+}
+
+func (rf *Raft) stateString() string {
+	return fmt.Sprintf("Term[%d],votedFor:%d,log:[0,%d)", rf.currentTerm, rf.votedFor, len(rf.log)-1)
 }
 
 // Make the service or tester wants to create a Raft server. the ports
