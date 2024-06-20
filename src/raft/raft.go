@@ -41,6 +41,11 @@ const (
 	replInterval       time.Duration = 200 * time.Millisecond
 )
 
+const (
+	InvalidTerm  = 0
+	InvalidIndex = 0
+)
+
 // ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -209,6 +214,18 @@ func (rf *Raft) stateString() string {
 	return fmt.Sprintf("Term[%d],votedFor:%d,log:[0,%d)", rf.currentTerm, rf.votedFor, len(rf.log)-1)
 }
 
+// 找到不同任期内的第一条日志
+func (rf *Raft) firstIndex(term int) int {
+	for idx, entry := range rf.log {
+		if entry.Term == term {
+			return idx
+		} else if entry.Term > term {
+			break
+		}
+	}
+	return InvalidIndex
+}
+
 // Make the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -227,14 +244,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (PartA, PartB, PartC).
 	rf.role = Follower
-	rf.currentTerm = 0
+	rf.currentTerm = 1
 	rf.votedFor = -1
 
 	// 初始化apply日志
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 
-	rf.log = append(rf.log, LogEntry{})
+	rf.log = append(rf.log, LogEntry{Term: InvalidTerm})
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 

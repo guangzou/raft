@@ -21,11 +21,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.becomeFollowerLocked(args.Term)
 	}
 
+	// 如果 Leader 和 Follower 匹配日志所花时间特别长，Follower 一直不重置选举时钟，就有可能错误的选举超时触发选举
+	// 无论 Follower 接受还是拒绝日志，只要认可对方是 Leader 就要重置时钟
+	defer rf.resetElectionTimerLocked()
+
 	prevIndex, prevTerm := args.PrevLogIndex, args.PrevLogTerm
 	// 要同步的日志索引比我本地的日志长度还要大，说明此时我已经很久没有同步日志了
-	if prevIndex > len(rf.log) {
+	if prevIndex >= len(rf.log) {
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Reject log, it's log too short, len:%d < prev:%d",
 			args.LeaderId, len(rf.log), prevIndex)
+		reply.ConfilictIndex = len(rf.log)
+		reply.ConfilictTerm = InvalidTerm
 		return
 	}
 
@@ -33,6 +39,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.log[prevIndex].Term != prevTerm {
 		LOG(rf.me, rf.currentTerm, DLog2, "<- S%d, Follower Reject log, Prev log not match, [%d]: T%d != T%d",
 			args.LeaderId, prevIndex, prevTerm, rf.log[prevIndex].Term)
+		reply.ConfilictTerm = rf.log[prevIndex].Term
+		reply.ConfilictIndex = rf.firstIndex(reply.ConfilictTerm)
 		return
 	}
 	// 更新本地日志，截断日志，从prevIndex处后面添加新的日志
@@ -47,7 +55,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.applyCond.Signal()
 	}
 
-	rf.resetElectionTimerLocked()
 	reply.Success = true
 }
 
@@ -85,6 +92,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// Follower 和 Leader 冲突日志的信息
+	ConfilictIndex int
+	ConfilictTerm  int
 }
 
 func (rf *Raft) startReplication(term int) bool {
@@ -101,19 +112,33 @@ func (rf *Raft) startReplication(term int) bool {
 			return
 		}
 		if !reply.Success {
-			index, term := args.PrevLogIndex, args.PrevLogTerm
-			for index > 0 && rf.log[index].Term == term {
-				index--
+			prevNext := rf.nextIndex[p]
+			// 该follower的日志太短
+			if reply.ConfilictTerm == InvalidTerm {
+				rf.nextIndex[p] = reply.ConfilictIndex
+			} else {
+				// 以 Leader 日志为准，跳过 ConfilictTerm 的所有日志
+				// 如果发现 Leader 日志中不存在 ConfilictTerm的任何日志，
+				// 则以 Follower 为准跳过 ConflictTerm，即使用 ConfilictIndex。
+				firstTermIndex := rf.firstIndex(reply.ConfilictTerm)
+				if firstTermIndex != InvalidIndex {
+					rf.nextIndex[p] = firstTermIndex + 1
+				} else {
+					rf.nextIndex[p] = reply.ConfilictIndex
+				}
 			}
-			rf.nextIndex[p] = index + 1
-			LOG(rf.me, rf.currentTerm, DLog, "Not match with S%d in %d, try next=%d", p, index, rf.nextIndex[p])
+			// 匹配探测期比较长时，会有多个探测的 RPC，如果 RPC 结果乱序回来：一个先发出去的探测 RPC 后回来了，
+			//其中所携带的 ConfilictTerm和 ConfilictIndex就有可能造成 rf.next 的“反复横跳”。
+			//为此，制 rf.next`单调递减
+			if rf.nextIndex[p] > prevNext {
+				rf.nextIndex[p] = prevNext
+			}
 			return
 		}
 		// 更新Leader的matchIndex和nextIndex
 		rf.matchIndex[p] = args.PrevLogIndex + len(args.Entries)
 		rf.nextIndex[p] = rf.matchIndex[p] + 1
 
-		// TODO：update commitIndex
 		majorIndex := rf.getMajorPeerMatchIndexLocked()
 		if majorIndex > rf.commitIndex {
 			LOG(rf.me, rf.currentTerm, DApply, "Leader update commitIndex %d -> %d", rf.commitIndex, majorIndex)
